@@ -297,8 +297,6 @@ def update_payment():
                         existing_payment.amount_paid = amount_paid  # Update amount
                 existing_payment.payment_status =payment_status 
 
-
-
             else:
                 customer.balance -= amount_paid
                 new_payment = Payment(
@@ -459,6 +457,40 @@ def get_payment_by_date():
         # In case of any other error, log the exception and return an error message
         print(f"Error occurred: {str(e)}")
         return jsonify({'error': 'An error occurred while processing the request'}), 500
+
+@app.route('/get_entries_by_worker', methods=['GET'])
+@jwt_required()
+def get_entries_by_worker():
+    try:
+        worker_id = get_jwt_identity()  # Extract worker ID from the JWT token
+        payment_date = request.args.get('payment_date', datetime.now().strftime('%Y-%m-%d'))
+
+        # Get all payments entered by the worker for the given date
+        payments = db.session.query(
+            Payment.customer_id,
+            Payment.amount_paid,
+            Payment.payment_date,
+            Payment.payment_status,
+            Customer.name.label("customer_name")  # Get customer name from Customer table
+        ).join(Customer, Payment.customer_id == Customer.contact_number) \
+         .filter(Payment.worker_id == worker_id, Payment.payment_date == payment_date ,Payment.payment_status=='Paid',Payment.payment_status=='paid' ).all()
+
+        # Format the data for the response
+        payment_data = [
+            {
+                "customer_id": payment.customer_id,
+                "customer_name": payment.customer_name,
+                "amount_paid": payment.amount_paid,
+                "payment_date": payment.payment_date.strftime('%Y-%m-%d'),  # Only date
+                "payment_status": payment.payment_status,
+            }
+            for payment in payments
+        ]
+        
+        return jsonify({"payments": payment_data}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True,host="0.0.0.0",port=5000)
