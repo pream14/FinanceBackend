@@ -3,6 +3,9 @@ from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from datetime import date, datetime, timedelta  # Use this for datetime functionality
 
+from decimal import Decimal
+
+
 
 
 from werkzeug.security import generate_password_hash, check_password_hash  # Import from werkzeug
@@ -100,9 +103,11 @@ class Customer(db.Model):
     __tablename__ = 'Customers'
     name = db.Column(db.String(100), nullable=False)
     contact_number = db.Column(db.String(15), primary_key=True, nullable=False)
+    location = db.Column(db.String(100), nullable=False)
     loan_amount = db.Column(db.Numeric(10, 2), nullable=False)
     repayment_type = db.Column(db.String(10), nullable=False)
-    location = db.Column(db.String(100), nullable=False)
+    balance = db.Column(db.Numeric(10, 2), nullable=False, default=0)  # Balance column
+
 
     def __init__(self, name, contact_number, loan_amount, repayment_type, location):
         self.name = name
@@ -228,8 +233,10 @@ class Payment(db.Model):
     customer_id = db.Column(db.String(15), db.ForeignKey('Customers.contact_number'), nullable=False)
     worker_id = db.Column(db.Integer, nullable=False)
     payment_date = db.Column(db.Date, nullable=False, default=date.today)
-    amount_paid = db.Column(db.Numeric(10, 2), nullable=False)
+    amount_paid = db.Column(db.Integer, nullable=False)
     payment_status = db.Column(db.Enum('Paid', 'Unpaid'), nullable=False)
+
+from decimal import Decimal
 
 @app.route('/update_payment', methods=['POST'])
 @jwt_required()
@@ -243,10 +250,23 @@ def update_payment():
             return jsonify({"error": "Invalid data format. Expected a list of payment records."}), 400
 
         for payment in data:
+            if not isinstance(payment, dict):
+                return jsonify({"error": "Each payment record must be a dictionary"}), 400
+
             customer_id = payment.get('customer_id')
             payment_date = payment.get('payment_date', str(date.today()))
             amount_paid = payment.get('amount_paid', 0)
+            previous_amount = payment.get('previous_amount', 0)
+
+            # Convert to Decimal for arithmetic operations
+            try:
+                amount_paid = Decimal(amount_paid)
+                previous_amount = Decimal(previous_amount)
+            except (ValueError, TypeError):
+                return jsonify({"error": "amount_paid and previous_amount must be numeric values"}), 400
+
             payment_status = payment.get('payment_status', 'Unpaid' if amount_paid == 0 else 'Paid')
+            payment_type = payment.get('payment_type', 'Payment')  # Default to 'Payment'
 
             if not customer_id:
                 return jsonify({"error": "Missing required fields in one or more payment records"}), 400
@@ -256,12 +276,35 @@ def update_payment():
             if not customer:
                 return jsonify({"error": f"Customer with ID {customer_id} not found"}), 404
 
+            # Ensure customer.balance is a Decimal
+            if not isinstance(customer.balance, Decimal):
+                customer.balance = Decimal(customer.balance)
+
             # Update or create payment
             existing_payment = Payment.query.filter_by(customer_id=customer_id, payment_date=payment_date).first()
             if existing_payment:
-                existing_payment.amount_paid = amount_paid
+                if payment_type == 'Addition':
+                    customer.balance -= amount_paid
+                    existing_payment.amount_paid += amount_paid
+                elif payment_type == 'Correction':
+                    if previous_amount is None:
+                        return jsonify({"error": "Missing previous amount for correction"}), 400
+                    if amount_paid > previous_amount:
+                        customer.balance -= (amount_paid - previous_amount)
+                        existing_payment.amount_paid = amount_paid  # Update amount
+                    else:
+                        customer.balance += (previous_amount - amount_paid)
+                        existing_payment.amount_paid = amount_paid  # Update amount
+                else:
+                    customer.balance -= amount_paid
+                    existing_payment.amount_paid = amount_paid  # Update amount
+                
                 existing_payment.payment_status = payment_status
+
+
+
             else:
+                customer.balance -= amount_paid
                 new_payment = Payment(
                     customer_id=customer_id,
                     worker_id=worker_id,  # Use worker ID from the token
@@ -336,6 +379,34 @@ def get_customers_payment_status():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+@app.route('/get_previous_amount', methods=['GET'])
+@jwt_required()  # Ensure the user is authenticated
+def get_previous_amount():
+    try:
+        # Extract worker ID from the token (if needed)
+        worker_id = get_jwt_identity()
+        
+        # Get customer ID and date from query parameters (can be passed via URL or request body)
+        customer_id = request.args.get('customer_id')  # Assuming customer_id is passed as a query parameter
+        payment_date = request.args.get('payment_date')  # Optionally pass a specific date
+
+        if not customer_id or not payment_date:
+            return jsonify({"error": "Customer ID and payment date are required"}), 400
+
+        # Query to find the last payment for this customer before or on the given date
+        previous_payment = Payment.query.filter(
+            Payment.customer_id == customer_id,
+            Payment.payment_date <= payment_date  # Ensure it's before or on the requested date
+        ).order_by(Payment.payment_date.desc()).first()  # Get the most recent payment
+
+        if not previous_payment:
+            return jsonify({"message": "No previous payment found for this customer on the specified date"}), 404
+
+        # Return the previous amount (amount paid on the last payment)
+        return jsonify({"previous_amount": previous_payment.amount_paid}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/get_payment_by_date', methods=['GET', 'POST'])
 def get_payment_by_date():
@@ -344,7 +415,7 @@ def get_payment_by_date():
 
     # Retrieve query parameters
     customer_id = request.args.get('customer_id')
-    payment_date = request.args.get('payment_date')
+    payment_date = request.args.get('payment_date',date)
 
     # Log received parameters
     print(f"Received customer_id: {customer_id}, payment_date: {payment_date}")
