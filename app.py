@@ -44,7 +44,6 @@ class User(db.Model):
         self.role = role
 
 
-
 @app.route('/login', methods=['POST'])
 def login():
     data = request.json
@@ -491,6 +490,64 @@ def get_entries_by_worker():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/get_customer_payment_history', methods=['GET'])
+@jwt_required()
+def get_customer_payment_history():
+    try:
+        # Extract worker_id from the JWT token
+        worker_id = get_jwt_identity()
+        
+        # Retrieve customer_id or customer_name from request arguments (optional)
+        customer_id = request.args.get('customer_id')  # Optional
+        customer_name = request.args.get('customer_name')  # Optional
+        
+        # Ensure that either customer_id or customer_name is provided
+        if not customer_id and not customer_name:
+            return jsonify({"error": "Either customer_id or customer_name must be provided"}), 400
+        
+        # Build the query to retrieve payment data
+        query = db.session.query(
+            Payment.customer_id,
+            Payment.amount_paid,
+            Payment.payment_date,
+            Payment.payment_status,
+            Customer.name.label("customer_name")  # Join with Customer table to get customer name
+        ).join(Customer, Payment.customer_id == Customer.contact_number)  # Assuming customer_id matches contact_number
+
+        # Apply filters based on the provided customer_id or customer_name
+        if customer_id:
+            query = query.filter(Payment.customer_id == customer_id)
+        
+        if customer_name:
+            query = query.filter(Customer.name.ilike(f'%{customer_name}%'))  # Case-insensitive matching for name
+
+        # Filter by worker_id to only retrieve the payments entered by the current worker
+        query = query.filter(Payment.worker_id == worker_id)
+        
+        # Execute the query and fetch the results
+        payments = query.all()
+
+        # Format the response data
+        payment_data = [
+            {
+                "customer_id": payment.customer_id,
+                "customer_name": payment.customer_name,
+                "amount_paid": payment.amount_paid,
+                "payment_date": payment.payment_date.strftime('%Y-%m-%d'),  # Date format
+                "payment_status": payment.payment_status,
+            }
+            for payment in payments
+        ]
+        
+        return jsonify({"payments": payment_data}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
 
 if __name__ == '__main__':
     app.run(debug=True,host="0.0.0.0",port=5000)
