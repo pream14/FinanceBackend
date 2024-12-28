@@ -286,7 +286,7 @@ def update_payment():
                 if payment_type == 'Addition':
                     customer.balance -= amount_paid
                     existing_payment.amount_paid += amount_paid
-                elif payment_type == 'Correction':
+                elif payment_type == 'Payment':
                     if previous_amount is None:
                         return jsonify({"error": "Missing previous amount for correction"}), 400
                     if amount_paid > previous_amount:
@@ -295,11 +295,7 @@ def update_payment():
                     else:
                         customer.balance += (previous_amount - amount_paid)
                         existing_payment.amount_paid = amount_paid  # Update amount
-                else:
-                    customer.balance -= amount_paid
-                    existing_payment.amount_paid = amount_paid  # Update amount
-                
-                existing_payment.payment_status = payment_status
+                existing_payment.payment_status =payment_status 
 
 
 
