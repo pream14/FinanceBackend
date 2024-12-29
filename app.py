@@ -2,6 +2,7 @@ from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from datetime import date, datetime, timedelta  # Use this for datetime functionality
+from sqlalchemy import func
 
 from decimal import Decimal
 
@@ -31,14 +32,15 @@ jwt = JWTManager(app)
 # Define the Users table model
 class User(db.Model):
     __tablename__ = 'Users'
-    user_id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(100), unique=True, nullable=False)
     password = db.Column(db.String(255), nullable=False)
     role = db.Column(db.String(50), nullable=False)
     created_at = db.Column(db.TIMESTAMP, default=db.func.current_timestamp())  # Add this field
 
 
-    def __init__(self, username, password, role):
+    def __init__(self,user_id, username, password, role):
+        self.user_id=user_id
         self.username = username
         self.password = password
         self.role = role
@@ -124,6 +126,7 @@ def create_customer():
     loan_amount = request.json.get('loan_amount')
     repayment_type = request.json.get('repayment_type')
     location = request.json.get('location')
+    balance=request.json.get('loan_amount')
 
     if not name or not contact_number or not loan_amount or not repayment_type or not location:
         return jsonify({"error": "All fields are required"}), 400
@@ -145,6 +148,7 @@ def create_customer():
 @app.route('/create_worker', methods=['POST'])
 def create_worker():
     # Get data from the POST request
+    user_id=request.json.get('user_id')
     username = request.json.get('username')
     password = request.json.get('password')
 
@@ -155,7 +159,7 @@ def create_worker():
     hashed_password = generate_password_hash(password)
 
     # Create a new worker with 'Worker' role
-    new_worker = User(username=username, password=hashed_password, role='Worker')
+    new_worker = User(user_id=user_id,username=username, password=hashed_password, role='Worker')
 
     # Add the new worker to the database
     try:
@@ -456,40 +460,55 @@ def get_payment_by_date():
         # In case of any other error, log the exception and return an error message
         print(f"Error occurred: {str(e)}")
         return jsonify({'error': 'An error occurred while processing the request'}), 500
-
 @app.route('/get_entries_by_worker', methods=['GET'])
 @jwt_required()
 def get_entries_by_worker():
     try:
-        worker_id = get_jwt_identity()  # Extract worker ID from the JWT token
+        worker_id = request.args.get('worker_id')  # Extract worker ID from the query parameter
         payment_date = request.args.get('payment_date', datetime.now().strftime('%Y-%m-%d'))
 
-        # Get all payments entered by the worker for the given date
-        payments = db.session.query(
+        # Base query
+        query = db.session.query(
             Payment.customer_id,
-            Payment.amount_paid,
             Payment.payment_date,
             Payment.payment_status,
-            Customer.name.label("customer_name")  # Get customer name from Customer table
+            Customer.name.label("customer_name"),
+            func.sum(Payment.amount_paid).label('total_amount_paid')  # Calculate total amount paid
         ).join(Customer, Payment.customer_id == Customer.contact_number) \
-         .filter(Payment.worker_id == worker_id, Payment.payment_date == payment_date ,Payment.payment_status=='Paid',Payment.payment_status=='paid' ).all()
+         .filter(Payment.payment_date == payment_date, Payment.payment_status == 'Paid') \
+         .group_by(Payment.customer_id, Customer.name, Payment.payment_date, Payment.payment_status)
+
+        # Apply worker_id filter only if it's provided
+        if worker_id:
+            query = query.filter(Payment.worker_id == worker_id)
+
+        # Execute the query
+        payments = query.all()
+
+        # Calculate total sum of all amount_paid
+        total_sum = sum(payment.total_amount_paid for payment in payments)
 
         # Format the data for the response
         payment_data = [
             {
                 "customer_id": payment.customer_id,
                 "customer_name": payment.customer_name,
-                "amount_paid": payment.amount_paid,
-                "payment_date": payment.payment_date.strftime('%Y-%m-%d'),  # Only date
+                "amount_paid": payment.total_amount_paid,
+                "payment_date": payment.payment_date.strftime('%Y-%m-%d'),
                 "payment_status": payment.payment_status,
             }
             for payment in payments
         ]
         
-        return jsonify({"payments": payment_data}), 200
+        # Add the total sum of all payments
+        return jsonify({
+            "payments": payment_data,
+            "total_amount_paid": total_sum  # Add the total amount paid
+        }), 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 
 @app.route('/get_customer_payment_history', methods=['GET'])
@@ -513,7 +532,10 @@ def get_customer_payment_history():
             Payment.amount_paid,
             Payment.payment_date,
             Payment.payment_status,
-            Customer.name.label("customer_name")  # Join with Customer table to get customer name
+            Customer.name.label("customer_name"),
+            Customer.balance ,
+            Customer.loan_amount ,
+            # Join with Customer table to get customer name
         ).join(Customer, Payment.customer_id == Customer.contact_number)  # Assuming customer_id matches contact_number
 
         # Apply filters based on the provided customer_id or customer_name
@@ -537,6 +559,8 @@ def get_customer_payment_history():
                 "amount_paid": payment.amount_paid,
                 "payment_date": payment.payment_date.strftime('%Y-%m-%d'),  # Date format
                 "payment_status": payment.payment_status,
+                "balance":payment.balance,
+                "loan_amount":payment.loan_amount
             }
             for payment in payments
         ]
